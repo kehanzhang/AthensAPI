@@ -1,6 +1,56 @@
+import { AwsClient } from 'aws4fetch';
+
 export interface Env {
 	ATHENS_MOCK_DB: D1Database;
+	R2_ACCESS_KEY_ID: string;
+	R2_SECRET_ACCESS_KEY: string;
+	R2_BUCKET_NAME: string;
+	R2_ACCOUNT_ID: string;
 }
+
+interface IGUser {
+	user_id: number;
+	username: string;
+	profile_pic_url: string | null;
+	name: string | null;
+	accessKey: string | null;
+	bio: string | null;
+	follower_count: number;
+	following_count: number;
+	posts: IGPost[];
+}
+
+interface IGPost {
+	post_id: string;
+	user_id: number;
+	taken_at: string;
+	caption_text: string | null;
+	image_url: string;
+	width: number;
+	height: number;
+	like_count: number;
+	comment_count: number;
+}
+type ErrorOrMessage = {
+	code: string;
+	message: string;
+};
+
+type DirectUploadResponse = {
+	result: {
+		id: string;
+		uploadURL: string;
+	};
+	success: boolean;
+	errors: ErrorOrMessage[];
+	messages: ErrorOrMessage[];
+};
+
+const r2Client = (env: Env) =>
+	new AwsClient({
+		accessKeyId: env.R2_ACCESS_KEY_ID,
+		secretAccessKey: env.R2_SECRET_ACCESS_KEY,
+	});
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
@@ -54,6 +104,10 @@ async function handleRequest(pathname: string, searchParams: URLSearchParams, en
 			return handleUpdateUser(request, env);
 		case '/api/createPost':
 			return handleCreatePost(request, env);
+		case '/api/getImageUploadUrl':
+			return handleGetImageUploadUrl(request, env);
+		// case '/api/debug-env':
+		// 	return handleDebugEnv(env);
 		default:
 			return handleInvalidEndpoint();
 	}
@@ -79,30 +133,6 @@ async function handleFeed(env: Env): Promise<Response> {
 		'SELECT p.*, u.username, u.profile_pic_url, u.name FROM IG_Posts p JOIN IG_Users u ON p.user_id = u.user_id ORDER BY RANDOM() LIMIT 5'
 	).all();
 	return Response.json(results);
-}
-
-interface IGUser {
-	user_id: number;
-	username: string;
-	profile_pic_url: string | null;
-	name: string | null;
-	accessKey: string | null;
-	bio: string | null;
-	follower_count: number;
-	following_count: number;
-	posts: IGPost[];
-}
-
-interface IGPost {
-	post_id: string;
-	user_id: number;
-	taken_at: string;
-	caption_text: string | null;
-	image_url: string;
-	width: number;
-	height: number;
-	like_count: number;
-	comment_count: number;
 }
 
 async function handleUser(searchParams: URLSearchParams, env: Env): Promise<Response> {
@@ -360,6 +390,52 @@ async function handleCreatePost(request: Request, env: Env): Promise<Response> {
 		});
 	} catch (error) {
 		return new Response('Error creating post in database', { status: 500 });
+	}
+}
+
+async function handleGetImageUploadUrl(request: Request, env: Env): Promise<Response> {
+	if (request.method !== 'POST') {
+		return new Response('Method not allowed', { status: 405 });
+	}
+
+	const { accessKey, fileName } = (await request.json()) as { accessKey: string; fileName: string };
+
+	if (!accessKey || !fileName) {
+		return new Response('AccessKey and fileName are required', { status: 400 });
+	}
+
+	// Check if user exists
+	const { results: existingUser } = await env.ATHENS_MOCK_DB.prepare('SELECT * FROM IG_Users WHERE accessKey = ?').bind(accessKey).all();
+
+	if (existingUser.length === 0) {
+		return new Response('User not found', { status: 404 });
+	}
+
+	try {
+		const r2 = r2Client(env);
+		const bucketName = env.R2_BUCKET_NAME;
+		const accountId = env.R2_ACCOUNT_ID;
+
+		const url = new URL(`https://${bucketName}.${accountId}.r2.cloudflarestorage.com`);
+		url.pathname = `/${fileName}`;
+		url.searchParams.set('X-Amz-Expires', '3600');
+
+		const signed = await r2.sign(
+			new Request(url, {
+				method: 'PUT',
+			}),
+			{
+				aws: { signQuery: true },
+			}
+		);
+
+		return new Response(JSON.stringify({ uploadURL: signed.url }), {
+			status: 200,
+			headers: { 'Content-Type': 'application/json' },
+		});
+	} catch (error) {
+		console.error(error);
+		return new Response('An unknown error occurred', { status: 500 });
 	}
 }
 
