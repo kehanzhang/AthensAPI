@@ -6,6 +6,7 @@ export interface Env {
 	R2_SECRET_ACCESS_KEY: string;
 	R2_BUCKET_NAME: string;
 	R2_ACCOUNT_ID: string;
+	R2_PUBLIC_DOMAIN: string; // Added R2_PUBLIC_DOMAIN
 }
 
 interface IGUser {
@@ -351,35 +352,35 @@ async function handleUpdateUser(request: Request, env: Env): Promise<Response> {
 		headers: { 'Content-Type': 'application/json' },
 	});
 }
-
 async function handleCreatePost(request: Request, env: Env): Promise<Response> {
 	if (request.method !== 'POST') {
 		return new Response('Method not allowed', { status: 405 });
 	}
 
-	const { accessKey, image_url, userId, takenAt }: { accessKey: string; image_url: string; userId: number; takenAt: string } =
+	const { accessKey, image_url, takenAt, caption }: { accessKey: string; image_url: string; takenAt: string; caption?: string } =
 		await request.json();
 
-	if (!accessKey || !image_url || !userId || !takenAt) {
-		return new Response('AccessKey, image_url, userId, and takenAt are required', { status: 400 });
+	if (!accessKey || !image_url || !takenAt) {
+		return new Response('AccessKey, image_url, and takenAt are required', { status: 400 });
 	}
 
-	// Check if user exists and has the correct accessKey
-	const { results: existingUser } = await env.ATHENS_MOCK_DB.prepare('SELECT * FROM IG_Users WHERE user_id = ? AND accessKey = ?')
-		.bind(userId, accessKey)
+	// Check if user exists and get the userId
+	const { results: existingUser } = await env.ATHENS_MOCK_DB.prepare('SELECT user_id FROM IG_Users WHERE accessKey = ?')
+		.bind(accessKey)
 		.all();
 
 	if (existingUser.length === 0) {
 		return new Response('User not found or invalid accessKey', { status: 404 });
 	}
 
+	const userId = existingUser[0].user_id;
 	const postId = crypto.randomUUID();
 
 	try {
 		await env.ATHENS_MOCK_DB.prepare(
-			'INSERT INTO IG_Posts (post_id, user_id, taken_at, image_url, width, height, like_count, comment_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+			'INSERT INTO IG_Posts (post_id, user_id, taken_at, image_url, caption_text, width, height, like_count, comment_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
 		)
-			.bind(postId, userId, takenAt, image_url, 0, 0, 0, 0)
+			.bind(postId, userId, takenAt, image_url, caption || null, 0, 0, 0, 0)
 			.run();
 
 		const { results: newPost } = await env.ATHENS_MOCK_DB.prepare('SELECT * FROM IG_Posts WHERE post_id = ?').bind(postId).all();
@@ -416,8 +417,15 @@ async function handleGetImageUploadUrl(request: Request, env: Env): Promise<Resp
 		const bucketName = env.R2_BUCKET_NAME;
 		const accountId = env.R2_ACCOUNT_ID;
 
+		// Generate a unique filename
+		const userId = existingUser[0].user_id;
+		const uniqueFileName = `${new Date().toISOString().replace(/[:.]/g, '-')}---${userId}---${fileName}`;
+
+		// Include the folder in the object key
+		const objectKey = `user-posts/${userId}/${uniqueFileName}`;
+
 		const url = new URL(`https://${bucketName}.${accountId}.r2.cloudflarestorage.com`);
-		url.pathname = `/${fileName}`;
+		url.pathname = `/${objectKey}`;
 		url.searchParams.set('X-Amz-Expires', '3600');
 
 		const signed = await r2.sign(
@@ -429,10 +437,19 @@ async function handleGetImageUploadUrl(request: Request, env: Env): Promise<Resp
 			}
 		);
 
-		return new Response(JSON.stringify({ uploadURL: signed.url }), {
-			status: 200,
-			headers: { 'Content-Type': 'application/json' },
-		});
+		// Construct the public URL
+		const publicUrl = `https://${env.R2_PUBLIC_DOMAIN}/user-posts/${userId}/${uniqueFileName}`;
+
+		return new Response(
+			JSON.stringify({
+				uploadURL: signed.url,
+				publicURL: publicUrl, // Use the constructed public URL
+			}),
+			{
+				status: 200,
+				headers: { 'Content-Type': 'application/json' },
+			}
+		);
 	} catch (error) {
 		console.error(error);
 		return new Response('An unknown error occurred', { status: 500 });
